@@ -18,8 +18,8 @@ interface FaceParticle {
 }
 
 const SAMPLE_STEP = 3
-const BRIGHTNESS_THRESHOLD = 34
-const MAX_FACE_PARTICLES = 6000
+const BRIGHTNESS_THRESHOLD = 20
+const MAX_FACE_PARTICLES = 7000
 const FIELD_PARTICLES = 2200
 const ASSEMBLE_MS = 1800
 
@@ -222,7 +222,7 @@ export default function FaceParticles({ active = true }: FaceParticlesProps) {
         y: Math.random() * h,
         tx: t.x,
         ty: t.y,
-        size: t.field ? 0.8 + Math.random() * 1.3 : 1.3 + t.bright * 1.8 + Math.random() * 0.6,
+        size: t.field ? 1.3 + Math.random() * 1.6 : 2.2 + t.bright * 2.4 + Math.random() * 0.8,
         hue: 205 + (t.tx / w) * 110, // biru -> magenta
         phase: Math.random() * Math.PI * 2,
         field: t.field,
@@ -253,12 +253,14 @@ export default function FaceParticles({ active = true }: FaceParticlesProps) {
         p.x += (goalX - p.x) * (0.035 + ease * 0.025)
         p.y += (goalY - p.y) * (0.035 + ease * 0.025)
 
-        const twinkle = 0.75 + Math.sin(now * 0.002 + p.phase) * 0.25
-        const baseAlpha = p.field ? 0.3 + p.bright * 0.5 : 0.55 + p.bright * 0.4
+        const twinkle = 0.85 + Math.sin(now * 0.002 + p.phase) * 0.15
+        const baseAlpha = p.field ? 0.55 + p.bright * 0.45 : 0.85 + p.bright * 0.15
         const alpha = Math.min(1, baseAlpha * twinkle)
 
         ctx.beginPath()
-        ctx.fillStyle = `hsla(${p.hue}, 90%, 68%, ${alpha})`
+        ctx.shadowColor = `hsla(${p.hue}, 95%, 60%, 0.9)`
+        ctx.shadowBlur = p.field ? 3 : 6
+        ctx.fillStyle = `hsla(${p.hue}, 95%, 72%, ${alpha})`
         ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
         ctx.fill()
       }
