@@ -2,6 +2,16 @@ import { useRef, useEffect, useState, useCallback } from 'react'
 
 type AIState = 'idle' | 'speaking' | 'listening' | 'thinking'
 
+// TODO: ganti dengan URL Edge Function kamu (dari tab Settings function di Supabase)
+const MIRANA_CHAT_URL = 'https://cavouyzyasnuygkuwizy.supabase.co/functions/v1/mirana-chat'
+// TODO: ganti dengan anon/publishable key project Supabase kamu (Settings > API)
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY'
+
+interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
 const N = 320
 
 // group sizes: head, eyes, neck, lshoulder, rshoulder, larm, rarm, chest, waist, energy
@@ -57,6 +67,8 @@ export default function App() {
   const [input, setInput] = useState('')
   const [micActive, setMicActive] = useState(false)
   const [navOpen, setNavOpen] = useState(false)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [isSending, setIsSending] = useState(false)
 
   const getCenter = useCallback(() => {
     const { W, H } = sizeRef.current
@@ -133,6 +145,51 @@ export default function App() {
       thinkTimers.current = [t1, t2, t3]
     }
   }, [assignIdleTargets, assignBodyTargets, assignListeningTargets, assignScatterTargets])
+
+  const sendMessage = useCallback(async (text: string) => {
+    if (!text.trim() || isSending) return
+
+    const userMsg: ChatMessage = { role: 'user', content: text.trim() }
+    const nextHistory = [...messages, userMsg]
+    setMessages(nextHistory)
+    setInput('')
+    setIsSending(true)
+    changeAIState('thinking')
+
+    try {
+      const res = await fetch(MIRANA_CHAT_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          apikey: SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({
+          message: userMsg.content,
+          history: messages, // history sebelum pesan baru ini
+        }),
+      })
+
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`)
+
+      const data = await res.json()
+      const reply: string = data.reply ?? 'Maaf, aku tidak bisa menjawab sekarang.'
+
+      setMessages(prev => [...prev, { role: 'assistant', content: reply }])
+      changeAIState('speaking')
+      setTimeout(() => {
+        stateRef.current = 'idle'
+        setAiState('idle')
+        assignIdleTargets()
+      }, 2600)
+    } catch (err) {
+      console.error('sendMessage error:', err)
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Maaf, terjadi kesalahan menghubungi server. Coba lagi.' }])
+      changeAIState('idle')
+    } finally {
+      setIsSending(false)
+    }
+  }, [messages, isSending, changeAIState, assignIdleTargets])
 
   useEffect(() => { micRef.current = micActive }, [micActive])
 
@@ -641,6 +698,36 @@ export default function App() {
             ))}
           </div>
 
+          {/* ── CHAT TRANSCRIPT ── */}
+          {messages.length > 0 && (
+            <div className="px-6 md:px-16 pb-4">
+              <div className="max-w-2xl mx-auto max-h-72 overflow-y-auto flex flex-col gap-3 py-2">
+                {messages.map((m, i) => (
+                  <div
+                    key={i}
+                    className="px-4 py-2.5 rounded-xl text-sm leading-relaxed max-w-[85%]"
+                    style={{
+                      alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                      background: m.role === 'user' ? 'rgba(0,212,255,0.12)' : 'rgba(255,255,255,0.04)',
+                      border: m.role === 'user' ? '1px solid rgba(0,212,255,0.25)' : '1px solid rgba(255,255,255,0.06)',
+                      color: m.role === 'user' ? '#E6FBFF' : '#B8CDD8',
+                    }}
+                  >
+                    {m.content}
+                  </div>
+                ))}
+                {isSending && (
+                  <div
+                    className="px-4 py-2.5 rounded-xl text-sm"
+                    style={{ alignSelf: 'flex-start', color: '#5A7A8E' }}
+                  >
+                    Mirana sedang mengetik…
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* ── CHAT INPUT ── */}
           <div className="px-6 md:px-16 pb-10">
             <div className="max-w-2xl mx-auto">
@@ -672,8 +759,10 @@ export default function App() {
                   }}
                   onFocus={() => changeAIState(input ? 'speaking' : 'listening')}
                   onBlur={() => { if (!input && !micActive) changeAIState('idle') }}
+                  onKeyDown={e => { if (e.key === 'Enter' && input.trim()) sendMessage(input) }}
                   placeholder="Ask Mirana anything..."
                   className="flex-1 bg-transparent outline-none text-sm text-white"
+                  disabled={isSending}
                 />
 
                 {/* Mic */}
@@ -707,12 +796,14 @@ export default function App() {
 
                 {/* Send */}
                 <button
-                  onClick={() => { if (input) { changeAIState('thinking'); setInput('') } }}
+                  onClick={() => { if (input.trim()) sendMessage(input) }}
+                  disabled={isSending}
                   className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 transition-all duration-200"
                   style={{
                     background: input ? 'linear-gradient(135deg,#00D4FF,#00AACC)' : 'rgba(255,255,255,0.05)',
                     color: input ? '#020408' : '#3A5060',
                     boxShadow: input ? '0 0 14px rgba(0,212,255,0.35)' : 'none',
+                    opacity: isSending ? 0.5 : 1,
                   }}
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
