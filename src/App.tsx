@@ -62,6 +62,8 @@ export default function App() {
   const micRef = useRef(false)
   const thinkTimers = useRef<ReturnType<typeof setTimeout>[]>([])
   const idleTimer = useRef(0)
+  const speakPulseRef = useRef(0) // 0-1, decays each frame; spikes on each spoken word ("mimik")
+  const recognitionRef = useRef<any>(null)
 
   const [aiState, setAiState] = useState<AIState>('idle')
   const [input, setInput] = useState('')
@@ -146,12 +148,34 @@ export default function App() {
     }
   }, [assignIdleTargets, assignBodyTargets, assignListeningTargets, assignScatterTargets])
 
+  const speakText = useCallback((text: string): Promise<void> => {
+    return new Promise(resolve => {
+      if (!('speechSynthesis' in window)) { resolve(); return }
+
+      window.speechSynthesis.cancel() // stop any previous utterance
+      const utter = new SpeechSynthesisUtterance(text)
+
+      const voices = window.speechSynthesis.getVoices()
+      const idVoice = voices.find(v => v.lang?.toLowerCase().startsWith('id'))
+      if (idVoice) utter.voice = idVoice
+      utter.lang = idVoice ? idVoice.lang : 'id-ID'
+      utter.rate = 1.02
+      utter.pitch = 1.05
+
+      // "Mimik": tiap batas kata, picu pulse yang dibaca canvas loop untuk kedip mata/energi
+      utter.onboundary = () => { speakPulseRef.current = 1 }
+      utter.onend = () => { speakPulseRef.current = 0; resolve() }
+      utter.onerror = () => { speakPulseRef.current = 0; resolve() }
+
+      window.speechSynthesis.speak(utter)
+    })
+  }, [])
+
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || isSending) return
 
     const userMsg: ChatMessage = { role: 'user', content: text.trim() }
-    const nextHistory = [...messages, userMsg]
-    setMessages(nextHistory)
+    setMessages(prev => [...prev, userMsg])
     setInput('')
     setIsSending(true)
     changeAIState('thinking')
@@ -177,11 +201,12 @@ export default function App() {
 
       setMessages(prev => [...prev, { role: 'assistant', content: reply }])
       changeAIState('speaking')
-      setTimeout(() => {
-        stateRef.current = 'idle'
-        setAiState('idle')
-        assignIdleTargets()
-      }, 2600)
+
+      await speakText(reply) // menunggu sampai Mirana selesai bicara
+
+      stateRef.current = 'idle'
+      setAiState('idle')
+      assignIdleTargets()
     } catch (err) {
       console.error('sendMessage error:', err)
       setMessages(prev => [...prev, { role: 'assistant', content: 'Maaf, terjadi kesalahan menghubungi server. Coba lagi.' }])
@@ -189,7 +214,48 @@ export default function App() {
     } finally {
       setIsSending(false)
     }
-  }, [messages, isSending, changeAIState, assignIdleTargets])
+  }, [messages, isSending, changeAIState, assignIdleTargets, speakText])
+
+  const startListening = useCallback(() => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    if (!SR) {
+      alert('Browser ini belum mendukung input suara. Coba pakai Chrome atau Edge.')
+      return
+    }
+
+    const recognition = new SR()
+    recognition.lang = 'id-ID'
+    recognition.interimResults = false
+    recognition.maxAlternatives = 1
+    recognitionRef.current = recognition
+
+    setMicActive(true)
+    micRef.current = true
+    changeAIState('listening')
+
+    recognition.onresult = (e: any) => {
+      const transcript = e.results?.[0]?.[0]?.transcript
+      if (transcript) sendMessage(transcript)
+    }
+    recognition.onerror = () => {
+      setMicActive(false)
+      micRef.current = false
+      changeAIState('idle')
+    }
+    recognition.onend = () => {
+      setMicActive(false)
+      micRef.current = false
+    }
+
+    recognition.start()
+  }, [changeAIState, sendMessage])
+
+  const stopListening = useCallback(() => {
+    recognitionRef.current?.stop()
+    setMicActive(false)
+    micRef.current = false
+    changeAIState('idle')
+  }, [changeAIState])
 
   useEffect(() => { micRef.current = micActive }, [micActive])
 
@@ -342,15 +408,18 @@ export default function App() {
       }
       ctx.stroke()
 
+      // Decay the "mimik" pulse triggered by speech word boundaries (see speakText)
+      speakPulseRef.current *= 0.86
+
       // Draw particles
       ps.forEach(p => {
         const pulse = Math.sin(t * 1.75 + p.phase) * 0.5 + 0.5
         const alpha = p.alpha * (0.58 + pulse * 0.42)
-        const size = p.size * (0.82 + pulse * 0.32)
+        const size = p.size * (0.82 + pulse * 0.32) * (1 + speakPulseRef.current * (p.group === 1 ? 0.5 : 0.12))
 
-        // Eye bloom when speaking
+        // Eye bloom when speaking — intensified per word by speakPulseRef ("mimik")
         if (p.group === 1 && st === 'speaking') {
-          const eyeA = alpha * (0.75 + Math.sin(t * 2.5 + p.phase) * 0.25)
+          const eyeA = alpha * (0.75 + Math.sin(t * 2.5 + p.phase) * 0.25) * (1 + speakPulseRef.current * 0.6)
           const bloom = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 7)
           bloom.addColorStop(0, `hsla(${p.hue},100%,92%,${eyeA})`)
           bloom.addColorStop(0.4, `hsla(${p.hue},100%,72%,${eyeA * 0.35})`)
@@ -767,12 +836,8 @@ export default function App() {
 
                 {/* Mic */}
                 <button
-                  onClick={() => {
-                    const next = !micActive
-                    setMicActive(next)
-                    micRef.current = next
-                    changeAIState(next ? 'listening' : input ? 'speaking' : 'idle')
-                  }}
+                  onClick={() => { micActive ? stopListening() : startListening() }}
+                  disabled={isSending}
                   className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 relative transition-all duration-200"
                   style={{
                     background: micActive ? 'rgba(0,212,255,0.15)' : 'transparent',
