@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
+import FaceParticles from './FaceParticles'
 
 type AIState = 'idle' | 'speaking' | 'listening' | 'thinking'
 
@@ -673,8 +674,20 @@ export default function App() {
           style={{ background: 'radial-gradient(ellipse at center, transparent 35%, rgba(2,4,8,0.7) 100%)' }}
         />
 
-        {/* Canvas hologram */}
-        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
+        {/* Canvas hologram (orb tubuh — aktif saat speaking / listening / thinking) */}
+        <canvas
+          ref={canvasRef}
+          className={`absolute inset-0 w-full h-full transition-opacity duration-700 ${
+            aiState === 'idle' ? 'opacity-0 pointer-events-none' : 'opacity-100'
+          }`}
+        />
+
+        {/* Wajah particle (vector) — tampil saat idle */}
+        {aiState === 'idle' && (
+          <div className="absolute inset-0 w-full h-full transition-opacity duration-700">
+            <FaceParticles active={aiState === 'idle'} />
+          </div>
+        )}
 
         {/* Bottom fade */}
         <div
