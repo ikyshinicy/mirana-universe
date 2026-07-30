@@ -1,12 +1,11 @@
 import { useRef, useEffect } from 'react'
 
-// Prototype "wajah dari titik" (image-to-particle mapping) — Opsi A.
-// Saat ini sumbernya masih placeholder buatan (bentuk wajah digambar pakai
-// primitif canvas), BUKAN foto/gambar asli, supaya bebas hak cipta.
-// Untuk hasil sedekat referensi (wajah nyata), ganti fungsi
-// `buildFaceBrightnessMap` di bawah supaya menggambar sebuah <img> foto/
-// AI-generated milikmu sendiri ke canvas tersembunyi, lalu logika sampling
-// di bawah akan otomatis bekerja dengan sumber itu.
+// Prototype "wajah dari titik" — versi vector.
+// Wajah digambar sebagai path asli (alis, mata+iris, hidung, bibir, garis
+// rahang, telinga) di canvas tersembunyi, lalu di-sample jadi partikel.
+// Ditambah lapisan "field" partikel swirl di sekitar wajah, murni prosedural.
+// Semua bentuk dibuat dari nol lewat kode — bukan hasil ekstraksi dari
+// foto/gambar berhak cipta manapun.
 
 interface FaceParticle {
   x: number; y: number
@@ -14,82 +13,121 @@ interface FaceParticle {
   size: number
   hue: number
   phase: number
+  field: boolean
 }
 
-const SAMPLE_STEP = 4
-const BRIGHTNESS_THRESHOLD = 40
-const MAX_PARTICLES = 3200
-const ASSEMBLE_MS = 1600
+const SAMPLE_STEP = 3
+const BRIGHTNESS_THRESHOLD = 60
+const MAX_FACE_PARTICLES = 5200
+const FIELD_PARTICLES = 2600
+const ASSEMBLE_MS = 1800
 
-function buildFaceBrightnessMap(w: number, h: number): ImageData {
-  const off = document.createElement('canvas')
-  off.width = w
-  off.height = h
-  const ctx = off.getContext('2d')!
-  ctx.fillStyle = '#000'
-  ctx.fillRect(0, 0, w, h)
+function drawFaceLineArt(octx: CanvasRenderingContext2D, w: number, h: number) {
+  const mobile = w < 768
+  const cx = mobile ? w * 0.5 : w * 0.64
+  const cy = mobile ? h * 0.4 : h * 0.47
+  const fw = Math.min(w, h) * (mobile ? 0.24 : 0.2)
+  const fh = Math.min(w, h) * (mobile ? 0.32 : 0.27)
 
-  const cx = w * 0.5
-  const cy = h * 0.48
-  const faceW = Math.min(w, h) * 0.22
-  const faceH = Math.min(w, h) * 0.3
+  octx.fillStyle = '#000'
+  octx.fillRect(0, 0, w, h)
+  octx.strokeStyle = '#fff'
+  octx.fillStyle = '#fff'
+  octx.lineCap = 'round'
+  octx.lineJoin = 'round'
 
-  // TODO(opsional): ganti blok di bawah ini dengan
-  //   ctx.drawImage(myImageElement, cx - faceW, cy - faceH, faceW * 2, faceH * 2)
-  // kalau sudah punya foto/gambar sumber sendiri.
+  // garis rahang / kontur wajah
+  octx.lineWidth = fw * 0.028
+  octx.beginPath()
+  octx.moveTo(cx - fw * 0.78, cy - fh * 0.32)
+  octx.bezierCurveTo(cx - fw * 0.98, cy - fh * 0.05, cx - fw * 0.92, cy + fh * 0.15, cx - fw * 0.82, cy + fh * 0.35)
+  octx.bezierCurveTo(cx - fw * 0.65, cy + fh * 0.78, cx - fw * 0.32, cy + fh * 1.0, cx, cy + fh * 1.08)
+  octx.bezierCurveTo(cx + fw * 0.32, cy + fh * 1.0, cx + fw * 0.65, cy + fh * 0.78, cx + fw * 0.82, cy + fh * 0.35)
+  octx.bezierCurveTo(cx + fw * 0.92, cy + fh * 0.15, cx + fw * 0.98, cy - fh * 0.05, cx + fw * 0.78, cy - fh * 0.32)
+  octx.bezierCurveTo(cx + fw * 0.55, cy - fh * 0.85, cx + fw * 0.22, cy - fh * 1.18, cx, cy - fh * 1.2)
+  octx.bezierCurveTo(cx - fw * 0.22, cy - fh * 1.18, cx - fw * 0.55, cy - fh * 0.85, cx - fw * 0.78, cy - fh * 0.32)
+  octx.stroke()
 
-  const grad = ctx.createRadialGradient(cx, cy - faceH * 0.1, faceW * 0.1, cx, cy, faceW * 1.15)
-  grad.addColorStop(0, 'rgba(255,255,255,0.95)')
-  grad.addColorStop(0.55, 'rgba(255,255,255,0.5)')
-  grad.addColorStop(1, 'rgba(255,255,255,0)')
-  ctx.fillStyle = grad
-  ctx.beginPath()
-  ctx.ellipse(cx, cy, faceW, faceH, 0, 0, Math.PI * 2)
-  ctx.fill()
-
-  ctx.fillStyle = 'rgba(255,255,255,0.22)'
-  ctx.beginPath()
-  ctx.ellipse(cx, cy - faceH * 0.55, faceW * 0.6, faceH * 0.2, 0, 0, Math.PI * 2)
-  ctx.fill()
-
-  ctx.fillStyle = 'rgba(0,0,0,0.65)'
+  // telinga
+  octx.lineWidth = fw * 0.022
   ;[-1, 1].forEach(side => {
-    ctx.beginPath()
-    ctx.ellipse(cx + side * faceW * 0.38, cy - faceH * 0.08, faceW * 0.17, faceH * 0.095, 0, 0, Math.PI * 2)
-    ctx.fill()
+    octx.beginPath()
+    octx.moveTo(cx + side * fw * 0.86, cy - fh * 0.05)
+    octx.bezierCurveTo(
+      cx + side * fw * 1.06, cy - fh * 0.02,
+      cx + side * fw * 1.06, cy + fh * 0.28,
+      cx + side * fw * 0.88, cy + fh * 0.32
+    )
+    octx.stroke()
   })
 
-  ctx.fillStyle = 'rgba(255,255,255,0.95)'
+  // alis
+  octx.lineWidth = fw * 0.03
   ;[-1, 1].forEach(side => {
-    ctx.beginPath()
-    ctx.ellipse(cx + side * faceW * 0.38, cy - faceH * 0.06, faceW * 0.075, faceH * 0.05, 0, 0, Math.PI * 2)
-    ctx.fill()
+    octx.beginPath()
+    octx.moveTo(cx + side * fw * 0.52, cy - fh * 0.36)
+    octx.quadraticCurveTo(cx + side * fw * 0.28, cy - fh * 0.46, cx + side * fw * 0.08, cy - fh * 0.37)
+    octx.stroke()
   })
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.45)'
-  ctx.lineWidth = faceW * 0.05
-  ctx.beginPath()
-  ctx.moveTo(cx, cy - faceH * 0.02)
-  ctx.lineTo(cx - faceW * 0.03, cy + faceH * 0.28)
-  ctx.stroke()
+  // mata (kelopak + iris + pupil)
+  const eyeW = fw * 0.24
+  const eyeH = fh * 0.1
+  ;[-1, 1].forEach(side => {
+    const ex = cx + side * fw * 0.3
+    const ey = cy - fh * 0.12
+    octx.lineWidth = fw * 0.02
+    octx.beginPath()
+    octx.moveTo(ex - eyeW / 2, ey)
+    octx.quadraticCurveTo(ex, ey - eyeH * 1.3, ex + eyeW / 2, ey)
+    octx.quadraticCurveTo(ex, ey + eyeH * 0.7, ex - eyeW / 2, ey)
+    octx.stroke()
 
-  ctx.strokeStyle = 'rgba(0,0,0,0.6)'
-  ctx.lineWidth = faceH * 0.055
-  ctx.beginPath()
-  ctx.moveTo(cx - faceW * 0.3, cy + faceH * 0.5)
-  ctx.quadraticCurveTo(cx, cy + faceH * 0.6, cx + faceW * 0.3, cy + faceH * 0.5)
-  ctx.stroke()
+    octx.lineWidth = fw * 0.016
+    octx.beginPath()
+    octx.arc(ex, ey + eyeH * 0.05, eyeH * 0.85, 0, Math.PI * 2)
+    octx.stroke()
 
-  return ctx.getImageData(0, 0, w, h)
+    octx.beginPath()
+    octx.arc(ex, ey + eyeH * 0.05, eyeH * 0.32, 0, Math.PI * 2)
+    octx.fill()
+  })
+
+  // jembatan hidung + cuping hidung
+  octx.lineWidth = fw * 0.022
+  octx.beginPath()
+  octx.moveTo(cx - fw * 0.03, cy - fh * 0.05)
+  octx.quadraticCurveTo(cx - fw * 0.09, cy + fh * 0.28, cx - fw * 0.11, cy + fh * 0.42)
+  octx.stroke()
+  octx.beginPath()
+  octx.moveTo(cx - fw * 0.11, cy + fh * 0.42)
+  octx.quadraticCurveTo(cx, cy + fh * 0.52, cx + fw * 0.11, cy + fh * 0.42)
+  octx.stroke()
+
+  // bibir
+  const lipY = cy + fh * 0.72
+  const lipW = fw * 0.42
+  octx.lineWidth = fw * 0.024
+  octx.beginPath()
+  octx.moveTo(cx - lipW / 2, lipY)
+  octx.quadraticCurveTo(cx - lipW * 0.15, lipY - fh * 0.06, cx, lipY - fh * 0.02)
+  octx.quadraticCurveTo(cx + lipW * 0.15, lipY - fh * 0.06, cx + lipW / 2, lipY)
+  octx.stroke()
+  octx.beginPath()
+  octx.moveTo(cx - lipW / 2, lipY)
+  octx.quadraticCurveTo(cx, lipY + fh * 0.13, cx + lipW / 2, lipY)
+  octx.stroke()
+
+  return { cx, cy, fw, fh }
 }
 
-function sampleParticles(img: ImageData, w: number, h: number): { x: number; y: number }[] {
+function sampleFaceParticles(img: ImageData, w: number, h: number) {
   const pts: { x: number; y: number }[] = []
   const data = img.data
   for (let y = 0; y < h; y += SAMPLE_STEP) {
     for (let x = 0; x < w; x += SAMPLE_STEP) {
       const i = (y * w + x) * 4
-      const brightness = ((data[i] + data[i + 1] + data[i + 2]) / 3) * (data[i + 3] / 255)
+      const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3
       if (brightness > BRIGHTNESS_THRESHOLD) {
         pts.push({
           x: x + (Math.random() - 0.5) * SAMPLE_STEP,
@@ -98,12 +136,25 @@ function sampleParticles(img: ImageData, w: number, h: number): { x: number; y: 
       }
     }
   }
-  if (pts.length > MAX_PARTICLES) {
-    for (let i = pts.length - 1; i > MAX_PARTICLES; i--) {
+  if (pts.length > MAX_FACE_PARTICLES) {
+    for (let i = pts.length - 1; i > MAX_FACE_PARTICLES; i--) {
       const j = Math.floor(Math.random() * (i + 1))
       pts[i] = pts[j]
     }
-    pts.length = MAX_PARTICLES
+    pts.length = MAX_FACE_PARTICLES
+  }
+  return pts
+}
+
+// swirl field di sekitar wajah, murni prosedural (bukan dari gambar)
+function buildFieldParticles(cx: number, cy: number, faceR: number, w: number, h: number) {
+  const pts: { x: number; y: number }[] = []
+  const maxR = Math.hypot(Math.max(cx, w - cx), Math.max(cy, h - cy))
+  for (let i = 0; i < FIELD_PARTICLES; i++) {
+    const r = faceR * 0.95 + (maxR - faceR) * Math.pow(Math.random(), 2.1)
+    let a = Math.random() * Math.PI * 2
+    a += r * 0.0032 // twist swirl mengikuti jarak
+    pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r * 0.92 })
   }
   return pts
 }
@@ -131,17 +182,28 @@ export default function FaceParticles({ active = true }: FaceParticlesProps) {
       canvas.height = h * dpr
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-      const map = buildFaceBrightnessMap(w, h)
-      const targets = sampleParticles(map, w, h)
+      const off = document.createElement('canvas')
+      off.width = w
+      off.height = h
+      const octx = off.getContext('2d')!
+      const { cx, cy, fw, fh } = drawFaceLineArt(octx, w, h)
+      const img = octx.getImageData(0, 0, w, h)
 
-      particlesRef.current = targets.map(t => ({
+      const facePts = sampleFaceParticles(img, w, h)
+      const faceR = Math.max(fw, fh) * 1.05
+      const fieldPts = buildFieldParticles(cx, cy, faceR, w, h)
+
+      const all = facePts.map(p => ({ ...p, field: false })).concat(fieldPts.map(p => ({ ...p, field: true })))
+
+      particlesRef.current = all.map(t => ({
         x: Math.random() * w,
         y: Math.random() * h,
         tx: t.x,
         ty: t.y,
-        size: 1 + Math.random() * 1.6,
-        hue: 210 + (t.x / w) * 90, // biru -> magenta
+        size: t.field ? 0.6 + Math.random() * 1.1 : 1 + Math.random() * 1.4,
+        hue: 205 + (t.tx / w) * 110, // biru -> magenta
         phase: Math.random() * Math.PI * 2,
+        field: t.field,
       }))
       startRef.current = performance.now()
     }
@@ -160,17 +222,17 @@ export default function FaceParticles({ active = true }: FaceParticlesProps) {
       const ease = 1 - Math.pow(1 - assembleProgress, 3)
 
       for (const p of particlesRef.current) {
-        const jitterX = Math.sin(now * 0.0016 + p.phase) * 1.2
-        const jitterY = Math.cos(now * 0.0013 + p.phase) * 1.2
+        const jitterX = Math.sin(now * 0.0015 + p.phase) * (p.field ? 0.6 : 1.1)
+        const jitterY = Math.cos(now * 0.0012 + p.phase) * (p.field ? 0.6 : 1.1)
         const goalX = p.tx + (assembleProgress >= 1 ? jitterX : 0)
         const goalY = p.ty + (assembleProgress >= 1 ? jitterY : 0)
 
-        p.x += (goalX - p.x) * (0.04 + ease * 0.02)
-        p.y += (goalY - p.y) * (0.04 + ease * 0.02)
+        p.x += (goalX - p.x) * (0.035 + ease * 0.02)
+        p.y += (goalY - p.y) * (0.035 + ease * 0.02)
 
-        const alpha = 0.5 + Math.sin(now * 0.002 + p.phase) * 0.2
+        const alpha = (p.field ? 0.35 : 0.55) + Math.sin(now * 0.002 + p.phase) * 0.2
         ctx.beginPath()
-        ctx.fillStyle = `hsla(${p.hue}, 85%, 65%, ${alpha})`
+        ctx.fillStyle = `hsla(${p.hue}, 85%, 65%, ${Math.max(0, alpha)})`
         ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
         ctx.fill()
       }
@@ -185,5 +247,5 @@ export default function FaceParticles({ active = true }: FaceParticlesProps) {
     }
   }, [active])
 
-  return <canvas ref={canvasRef} className="w-full h-full block" style={{ background: '#05050a' }} />
+  return <canvas ref={canvasRef} className="w-full h-full block" style={{ background: '#050508' }} />
 }
