@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import FaceParticles from './FaceParticles'
+import faceImg from './assets/mirana-face.jpg'
 
 type AIState = 'idle' | 'speaking' | 'listening' | 'thinking'
 
@@ -13,47 +13,23 @@ interface ChatMessage {
   content: string
 }
 
-const N = 320
-
-// group sizes: head, eyes, neck, lshoulder, rshoulder, larm, rarm, chest, waist, energy
-const GROUPS = [56, 10, 9, 18, 18, 28, 28, 44, 21, 88]
-
 interface Particle {
-  x: number; y: number
-  vx: number; vy: number
-  tx: number; ty: number
-  size: number; alpha: number; phase: number
-  group: number; hue: number
+  x: number; y: number       // posisi saat ini (dianimasikan)
+  tx: number; ty: number     // posisi target dari hasil sampling gambar wajah
+  r: number; g: number; b: number
+  size: number; phase: number
+  jitterAmp: number; jitterSpeed: number
+  dirX: number; dirY: number // arah dari centroid wajah (untuk efek breathing)
+  isMouth: boolean; isEye: boolean
 }
 
-function ss(t: number): number {
-  const c = Math.max(0, Math.min(1, t))
-  return c * c * (3 - 2 * c)
-}
-
-function bodyPos(g: number, cx: number, cy: number, s: number): [number, number] {
-  const rn = () => (Math.random() - 0.5) * 2
-  switch (g) {
-    case 0: {
-      const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random())
-      return [cx + Math.cos(a) * r * s * 0.22, cy - s * 1.22 + Math.sin(a) * r * s * 0.27]
-    }
-    case 1: {
-      const w = Math.random()
-      if (w < 0.38) return [cx - s * 0.1 + rn() * s * 0.02, cy - s * 1.26 + rn() * s * 0.014]
-      if (w < 0.76) return [cx + s * 0.1 + rn() * s * 0.02, cy - s * 1.26 + rn() * s * 0.014]
-      return [cx + rn() * s * 0.045, cy - s * 1.09 + rn() * s * 0.014]
-    }
-    case 2: return [cx + rn() * s * 0.055, cy - s * 0.95 + rn() * s * 0.08]
-    case 3: { const u = Math.random(); return [cx - s * 0.22 - u * s * 0.44, cy - s * 0.8 + rn() * s * 0.04] }
-    case 4: { const u = Math.random(); return [cx + s * 0.22 + u * s * 0.44, cy - s * 0.8 + rn() * s * 0.04] }
-    case 5: { const u = Math.random(); return [cx - s * 0.6 - u * s * 0.14, cy - s * 0.78 + u * s * 0.85 + rn() * s * 0.038] }
-    case 6: { const u = Math.random(); return [cx + s * 0.6 + u * s * 0.14, cy - s * 0.78 + u * s * 0.85 + rn() * s * 0.038] }
-    case 7: { const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()); return [cx + Math.cos(a) * r * s * 0.24, cy - s * 0.5 + Math.sin(a) * r * s * 0.2] }
-    case 8: return [cx + rn() * s * 0.17, cy - s * 0.13 + rn() * s * 0.1]
-    default: { const a = Math.random() * Math.PI * 2, d = 0.85 + Math.random() * 1.0; return [cx + Math.cos(a) * s * d * 0.46, cy - s * 0.55 + Math.sin(a) * s * d * 0.52] }
-  }
-}
+// Zona wajah dikalibrasi manual terhadap src/assets/mirana-face.jpg
+// (ubah nilai ini kalau ganti gambar sumber dengan proporsi wajah berbeda)
+const MOUTH_Y: [number, number] = [0.655, 0.735]
+const MOUTH_X: [number, number] = [0.36, 0.64]
+const EYES_Y: [number, number] = [0.42, 0.51]
+const EYES_X: [number, number] = [0.20, 0.80]
+const BRIGHTNESS_THRESHOLD = 30
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -62,9 +38,9 @@ export default function App() {
   const stateRef = useRef<AIState>('idle')
   const micRef = useRef(false)
   const thinkTimers = useRef<ReturnType<typeof setTimeout>[]>([])
-  const idleTimer = useRef(0)
   const speakPulseRef = useRef(0) // 0-1, decays each frame; spikes on each spoken word ("mimik")
   const recognitionRef = useRef<any>(null)
+  const centroidRef = useRef({ x: 0, y: 0 })
 
   const [aiState, setAiState] = useState<AIState>('idle')
   const [input, setInput] = useState('')
@@ -73,81 +49,19 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isSending, setIsSending] = useState(false)
 
-  const getCenter = useCallback(() => {
-    const { W, H } = sizeRef.current
-    const mobile = W < 768
-    return {
-      cx: mobile ? W * 0.5 : W * 0.64,
-      cy: mobile ? H * 0.4 : H * 0.52,
-      s: Math.min(W, H) * (mobile ? 0.27 : 0.28),
-    }
-  }, [])
-
-  const assignIdleTargets = useCallback(() => {
-    const { cx, cy, s } = getCenter()
-    particlesRef.current.forEach(p => {
-      const a = p.phase + Math.random() * 1.4
-      const d = s * (0.15 + Math.random() * 1.2)
-      p.tx = cx + Math.cos(a) * d * 0.74
-      p.ty = cy - s * 0.52 + Math.sin(a) * d * 0.95
-    })
-  }, [getCenter])
-
-  const assignBodyTargets = useCallback(() => {
-    const { cx, cy, s } = getCenter()
-    particlesRef.current.forEach(p => {
-      const [tx, ty] = bodyPos(p.group, cx, cy, s)
-      p.tx = tx; p.ty = ty
-    })
-  }, [getCenter])
-
-  const assignListeningTargets = useCallback(() => {
-    const { cx, cy, s } = getCenter()
-    particlesRef.current.forEach(p => {
-      if (p.group <= 2) {
-        const [tx, ty] = bodyPos(p.group, cx, cy, s)
-        p.tx = tx; p.ty = ty
-      } else {
-        const a = Math.random() * Math.PI * 2, d = Math.random() * s * 0.85
-        p.tx = cx + Math.cos(a) * d
-        p.ty = cy - s * 1.12 + Math.sin(a) * d * 0.65
-      }
-    })
-  }, [getCenter])
-
-  const assignScatterTargets = useCallback(() => {
-    const { cx, cy } = getCenter()
-    const { W, H } = sizeRef.current
-    particlesRef.current.forEach(p => {
-      const a = Math.random() * Math.PI * 2
-      const d = Math.max(W, H) * (0.4 + Math.random() * 0.7)
-      p.tx = cx + Math.cos(a) * d
-      p.ty = cy + Math.sin(a) * d
-    })
-  }, [getCenter])
-
   const changeAIState = useCallback((newState: AIState) => {
     thinkTimers.current.forEach(clearTimeout)
     thinkTimers.current = []
     stateRef.current = newState
     setAiState(newState)
 
-    if (newState === 'idle') {
-      assignIdleTargets()
-    } else if (newState === 'speaking') {
-      assignBodyTargets()
-    } else if (newState === 'listening') {
-      assignListeningTargets()
-    } else if (newState === 'thinking') {
-      const t1 = setTimeout(() => assignScatterTargets(), 80)
-      const t2 = setTimeout(() => assignBodyTargets(), 1500)
-      const t3 = setTimeout(() => {
-        stateRef.current = 'speaking'
-        setAiState('speaking')
-      }, 3000)
-      thinkTimers.current = [t1, t2, t3]
+    // Auto-transisi demo: kalau dibiarkan di 'thinking' (mis. klik tombol demo),
+    // otomatis lanjut ke 'speaking' setelah 3 detik.
+    if (newState === 'thinking') {
+      const t = setTimeout(() => { stateRef.current = 'speaking'; setAiState('speaking') }, 3000)
+      thinkTimers.current = [t]
     }
-  }, [assignIdleTargets, assignBodyTargets, assignListeningTargets, assignScatterTargets])
+  }, [])
 
   const speakText = useCallback((text: string): Promise<void> => {
     return new Promise(resolve => {
@@ -163,7 +77,7 @@ export default function App() {
       utter.rate = 1.02
       utter.pitch = 1.05
 
-      // "Mimik": tiap batas kata, picu pulse yang dibaca canvas loop untuk kedip mata/energi
+      // "Mimik": tiap batas kata, picu pulse yang dibaca canvas loop untuk gerak mulut/mata
       utter.onboundary = () => { speakPulseRef.current = 1 }
       utter.onend = () => { speakPulseRef.current = 0; resolve() }
       utter.onerror = () => { speakPulseRef.current = 0; resolve() }
@@ -207,7 +121,6 @@ export default function App() {
 
       stateRef.current = 'idle'
       setAiState('idle')
-      assignIdleTargets()
     } catch (err) {
       console.error('sendMessage error:', err)
       setMessages(prev => [...prev, { role: 'assistant', content: 'Maaf, terjadi kesalahan menghubungi server. Coba lagi.' }])
@@ -215,7 +128,7 @@ export default function App() {
     } finally {
       setIsSending(false)
     }
-  }, [messages, isSending, changeAIState, assignIdleTargets, speakText])
+  }, [messages, isSending, changeAIState, speakText])
 
   const startListening = useCallback(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
@@ -260,29 +173,80 @@ export default function App() {
 
   useEffect(() => { micRef.current = micActive }, [micActive])
 
+  // ---- Canvas: wajah partikel dari gambar, reaktif ke aiState + suara ----
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
+    const canvasEl = canvasRef.current
+    if (!canvasEl) return
+    const canvas = canvasEl as HTMLCanvasElement
 
-    function initParticles(W: number, H: number) {
+    const ctxRaw = canvas.getContext('2d')
+    if (!ctxRaw) return
+    const ctx = ctxRaw as CanvasRenderingContext2D
+
+    const img = new Image()
+    let imgLoaded = false
+
+    function buildParticles(W: number, H: number) {
+      if (!imgLoaded || !W || !H) return
+      const mobile = W < 768
+      const targetH = Math.floor(Math.min(H * 0.86, 780))
+      const scale = targetH / img.naturalHeight
+      const targetW = Math.floor(img.naturalWidth * scale)
+
+      const off = document.createElement('canvas')
+      off.width = targetW
+      off.height = targetH
+      const octx = off.getContext('2d')
+      if (!octx) return
+      octx.drawImage(img, 0, 0, targetW, targetH)
+
+      let data: Uint8ClampedArray
+      try { data = octx.getImageData(0, 0, targetW, targetH).data }
+      catch { return }
+
+      const offsetX = Math.floor(mobile ? (W - targetW) / 2 : W * 0.62 - targetW / 2)
+      const offsetY = Math.floor(H * (mobile ? 0.4 : 0.5) - targetH / 2)
+      const step = mobile ? 6 : 4
+
       const ps: Particle[] = []
-      let gi = 0, gc = 0
-      for (let i = 0; i < N; i++) {
-        while (gc >= GROUPS[gi] && gi < GROUPS.length - 1) { gi++; gc = 0 }
-        gc++
-        const hue = gi === 1 ? 196 : gi === 9 ? 264 : 182 + Math.random() * 20
-        ps.push({
-          x: Math.random() * W, y: Math.random() * H,
-          vx: (Math.random() - 0.5) * 0.3, vy: (Math.random() - 0.5) * 0.3,
-          tx: W / 2, ty: H / 2,
-          size: 1.2 + Math.random() * 1.8,
-          alpha: 0.5 + Math.random() * 0.5,
-          phase: Math.random() * Math.PI * 2,
-          group: gi, hue,
-        })
+      let sumX = 0, sumY = 0
+
+      for (let y = 0; y < targetH; y += step) {
+        for (let x = 0; x < targetW; x += step) {
+          const idx = (y * targetW + x) * 4
+          const r = data[idx], g = data[idx + 1], b = data[idx + 2]
+          if (r === undefined) continue
+          const brightness = (r + g + b) / 3
+          if (brightness < BRIGHTNESS_THRESHOLD) continue
+
+          const ry = y / targetH, rx = x / targetW
+          const isMouth = ry >= MOUTH_Y[0] && ry <= MOUTH_Y[1] && rx >= MOUTH_X[0] && rx <= MOUTH_X[1]
+          const isEye = ry >= EYES_Y[0] && ry <= EYES_Y[1] && rx >= EYES_X[0] && rx <= EYES_X[1]
+
+          const tx = offsetX + x, ty = offsetY + y
+          sumX += tx; sumY += ty
+
+          ps.push({
+            x: Math.random() * W, y: Math.random() * H,
+            tx, ty, r, g, b,
+            size: 1.1 * (0.6 + (brightness / 255) * 0.8),
+            phase: Math.random() * Math.PI * 2,
+            jitterAmp: 0.9 + Math.random() * 1.6,
+            jitterSpeed: 0.8 + Math.random() * 0.9,
+            dirX: 0, dirY: 0,
+            isMouth, isEye,
+          })
+        }
       }
+
+      const cx = sumX / (ps.length || 1), cy = sumY / (ps.length || 1)
+      ps.forEach(p => {
+        const dx = p.tx - cx, dy = p.ty - cy
+        const len = Math.hypot(dx, dy) || 1
+        p.dirX = dx / len
+        p.dirY = dy / len
+      })
+      centroidRef.current = { x: cx, y: cy }
       particlesRef.current = ps
     }
 
@@ -293,208 +257,120 @@ export default function App() {
       canvas.height = H * dpr
       ctx.scale(dpr, dpr)
       sizeRef.current = { W, H }
-      initParticles(W, H)
-      assignIdleTargets()
+      buildParticles(W, H)
     }
 
-    let raf = 0
-    let lastT = 0
+    img.onload = () => { imgLoaded = true; resize() }
+    img.src = faceImg
 
-    function loop(ts: number) {
+    let raf = 0
+    let t = 0
+
+    function loop() {
       raf = requestAnimationFrame(loop)
-      const dt = Math.min(ts - lastT, 50)
-      lastT = ts
-      const t = ts * 0.001
+      t += 0.016
 
       const { W, H } = sizeRef.current
+      const ps = particlesRef.current
       if (!W || !H) return
 
-      const st = stateRef.current
-      const mobile = W < 768
-      const cx = mobile ? W * 0.5 : W * 0.64
-      const cy = mobile ? H * 0.4 : H * 0.52
-      const s = Math.min(W, H) * (mobile ? 0.27 : 0.28)
-
       ctx.clearRect(0, 0, W, H)
+      if (!ps.length) return
 
-      // Central volumetric glow
-      const glowA = st === 'idle' ? 0.09 : st === 'thinking' ? 0.07 + Math.sin(t * 3.2) * 0.04 : 0.15
-      const glowR = s * (st === 'idle' ? 1.7 : 2.4)
-      const grd = ctx.createRadialGradient(cx, cy - s * 0.55, 0, cx, cy - s * 0.55, glowR)
-      grd.addColorStop(0, `rgba(0,175,255,${glowA})`)
-      grd.addColorStop(0.35, `rgba(30,70,220,${glowA * 0.4})`)
-      grd.addColorStop(0.7, `rgba(90,20,170,${glowA * 0.12})`)
+      const st = stateRef.current
+      const { x: cx, y: cy } = centroidRef.current
+
+      // Central glow, warna berubah sesuai state
+      const glowColor = st === 'thinking' ? '140,80,255' : st === 'listening' ? '0,210,255' : '0,175,255'
+      const glowA = st === 'idle' ? 0.08 : st === 'thinking' ? 0.10 + Math.sin(t * 3.2) * 0.03 : 0.14
+      const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.55)
+      grd.addColorStop(0, `rgba(${glowColor},${glowA})`)
       grd.addColorStop(1, 'rgba(0,0,0,0)')
       ctx.fillStyle = grd
       ctx.fillRect(0, 0, W, H)
 
-      // Subtle floor light when speaking
-      if (st === 'speaking') {
-        const fa = 0.06 + Math.sin(t * 1.1) * 0.02
-        const fGrd = ctx.createRadialGradient(cx, cy + s * 0.3, 0, cx, cy + s * 0.3, s * 1.5)
-        fGrd.addColorStop(0, `rgba(0,212,255,${fa})`)
-        fGrd.addColorStop(1, 'rgba(0,0,0,0)')
-        ctx.fillStyle = fGrd
-        ctx.fillRect(0, 0, W, H)
-      }
+      // Decay pulse "mimik" dari speech word boundary
+      speakPulseRef.current *= 0.9
+      const rhythmicMouth = st === 'speaking' ? (Math.sin(t * 9) * 0.5 + 0.5) * 0.7 : 0
+      const mouthDrive = Math.max(speakPulseRef.current, rhythmicMouth)
+      const eyeDrive = st === 'speaking'
+        ? Math.max(speakPulseRef.current, 0.25 + Math.sin(t * 3) * 0.15)
+        : speakPulseRef.current
 
-      const ps = particlesRef.current
+      // Thinking: partikel bergetar lebih cepat (kesan "memproses")
+      const thinkBoost = st === 'thinking' ? 1.7 : 1
+      const breathe = Math.sin(t * 0.55) * 1.4
 
-      // Refresh idle targets gradually
-      if (st === 'idle') {
-        idleTimer.current += dt
-        if (idleTimer.current > 1800) {
-          idleTimer.current = 0
-          const n = Math.floor(N * 0.12)
-          for (let i = 0; i < n; i++) {
-            const p = ps[Math.floor(Math.random() * N)]
-            const a = p.phase + t * 0.06 + Math.random() * 1.0
-            const d = s * (0.18 + Math.random() * 1.15)
-            p.tx = cx + Math.cos(a) * d * 0.74
-            p.ty = cy - s * 0.52 + Math.sin(a) * d * 0.95
-          }
+      ctx.globalCompositeOperation = 'lighter'
+      for (let i = 0; i < ps.length; i++) {
+        const p = ps[i]
+        p.x += (p.tx - p.x) * 0.08
+        p.y += (p.ty - p.y) * 0.08
+
+        let jx = Math.sin(t * p.jitterSpeed * thinkBoost + p.phase) * p.jitterAmp + p.dirX * breathe
+        let jy = Math.cos(t * p.jitterSpeed * 0.9 * thinkBoost + p.phase) * p.jitterAmp + p.dirY * breathe
+        let size = p.size
+        let alpha = 0.9
+
+        if (p.isMouth) {
+          jy += mouthDrive * Math.sin(t * 14 + p.phase) * 5
+          size *= 1 + mouthDrive * 0.6
+          alpha = Math.min(1, alpha + mouthDrive * 0.3)
         }
-      } else {
-        idleTimer.current = 0
-      }
-
-      const lerpF = st === 'idle' ? 0.006 : st === 'thinking' ? 0.016 : 0.028
-
-      // Update particles
-      ps.forEach(p => {
-        // Listening: magnetic wave toward head
+        if (p.isEye) {
+          size *= 1 + eyeDrive * 0.7
+          alpha = Math.min(1, alpha + eyeDrive * 0.4)
+        }
         if (st === 'listening') {
-          const headY = cy - s * 1.2
-          const dx = cx - p.x, dy = headY - p.y
-          const dist = Math.sqrt(dx * dx + dy * dy) + 1
-          const wave = Math.sin(t * 4.0 - dist * 0.03) * 0.2
-          p.vx += (dx / dist) * wave * 0.18
-          p.vy += (dy / dist) * wave * 0.18
+          alpha = Math.min(1, alpha + 0.08 + Math.sin(t * 2 + p.phase) * 0.05)
         }
 
-        // Speaking: subtle chest breath
-        if (st === 'speaking' && p.group === 7) {
-          p.vy += Math.sin(t * 1.15 + p.phase) * 0.012
-        }
+        ctx.beginPath()
+        ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${alpha})`
+        ctx.arc(p.x + jx, p.y + jy, size, 0, Math.PI * 2)
+        ctx.fill()
 
-        p.vx += (p.tx - p.x) * lerpF
-        p.vy += (p.ty - p.y) * lerpF
-        p.vx *= 0.908
-        p.vy *= 0.908
-        p.x += p.vx
-        p.y += p.vy
-      })
-
-      // Draw connection lines (single batched stroke for performance)
-      const lineHue = st === 'thinking' ? 258 : st === 'listening' ? 200 : 191
-      const thresh = s * 0.52
-      const threshSq = thresh * thresh
-
-      ctx.strokeStyle = `hsla(${lineHue},100%,65%,0.2)`
-      ctx.lineWidth = 0.55
-      ctx.beginPath()
-      for (let i = 0; i < N; i++) {
-        const pi = ps[i]
-        for (let j = i + 1; j < N; j++) {
-          const pj = ps[j]
-          const dx = pi.x - pj.x
-          if (Math.abs(dx) >= thresh) continue
-          const dy = pi.y - pj.y
-          if (Math.abs(dy) >= thresh) continue
-          if (dx * dx + dy * dy < threshSq) {
-            ctx.moveTo(pi.x, pi.y)
-            ctx.lineTo(pj.x, pj.y)
-          }
-        }
-      }
-      ctx.stroke()
-
-      // Decay the "mimik" pulse triggered by speech word boundaries (see speakText)
-      speakPulseRef.current *= 0.86
-
-      // Draw particles
-      ps.forEach(p => {
-        const pulse = Math.sin(t * 1.75 + p.phase) * 0.5 + 0.5
-        const alpha = p.alpha * (0.58 + pulse * 0.42)
-        const size = p.size * (0.82 + pulse * 0.32) * (1 + speakPulseRef.current * (p.group === 1 ? 0.5 : 0.12))
-
-        // Eye bloom when speaking — intensified per word by speakPulseRef ("mimik")
-        if (p.group === 1 && st === 'speaking') {
-          const eyeA = alpha * (0.75 + Math.sin(t * 2.5 + p.phase) * 0.25) * (1 + speakPulseRef.current * 0.6)
-          const bloom = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 7)
-          bloom.addColorStop(0, `hsla(${p.hue},100%,92%,${eyeA})`)
-          bloom.addColorStop(0.4, `hsla(${p.hue},100%,72%,${eyeA * 0.35})`)
+        if (p.isEye && eyeDrive > 0.1) {
+          const bloom = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 6)
+          bloom.addColorStop(0, `rgba(${p.r},${p.g},${p.b},${eyeDrive * 0.5})`)
           bloom.addColorStop(1, 'transparent')
           ctx.fillStyle = bloom
           ctx.beginPath()
-          ctx.arc(p.x, p.y, size * 7, 0, Math.PI * 2)
+          ctx.arc(p.x, p.y, size * 6, 0, Math.PI * 2)
           ctx.fill()
         }
+      }
+      ctx.globalCompositeOperation = 'source-over'
 
-        // Thinking: purple scatter glow
-        if (st === 'thinking') {
-          const tGlow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 3.5)
-          tGlow.addColorStop(0, `hsla(${p.hue + 55},100%,78%,${alpha * 0.55})`)
-          tGlow.addColorStop(1, 'transparent')
-          ctx.fillStyle = tGlow
-          ctx.beginPath()
-          ctx.arc(p.x, p.y, size * 3.5, 0, Math.PI * 2)
-          ctx.fill()
-        }
-
-        ctx.fillStyle = `hsla(${p.hue},100%,70%,${alpha})`
-        ctx.beginPath()
-        ctx.arc(p.x, p.y, size, 0, Math.PI * 2)
-        ctx.fill()
-      })
-
-      // Listening: concentric sound wave rings at head
+      // Listening: cincin gelombang suara menyebar dari wajah
       if (st === 'listening') {
-        const headY = cy - s * 1.22
         const numWaves = micRef.current ? 5 : 3
         for (let w = 0; w < numWaves; w++) {
           const progress = ((t * 0.68 + w / numWaves) % 1)
-          const r = progress * s * 1.85
-          const wa = (1 - progress) * 0.42
+          const r = progress * Math.max(W, H) * 0.42
+          const wa = (1 - progress) * 0.35
           ctx.strokeStyle = `rgba(0,215,255,${wa})`
           ctx.lineWidth = 1 + (1 - progress) * 0.8
           ctx.beginPath()
-          ctx.arc(cx, headY, r, 0, Math.PI * 2)
+          ctx.arc(cx, cy, r, 0, Math.PI * 2)
           ctx.stroke()
         }
       }
 
-      // Speaking: flowing energy particles down the body
-      if (st === 'speaking') {
-        for (let f = 0; f < 4; f++) {
-          const flowT = ((t * 0.52 + f * 0.25) % 1)
-          const flowY = cy - s * 1.3 + flowT * s * 1.55
-          const flowX = cx + Math.sin(flowT * Math.PI * 3.5 + f * 1.9) * s * 0.14
-          const fa = ss(Math.min(flowT * 3, 1)) * ss(Math.min((1 - flowT) * 3, 1)) * 0.6
-          const fGrd = ctx.createRadialGradient(flowX, flowY, 0, flowX, flowY, s * 0.075)
-          fGrd.addColorStop(0, `rgba(0,230,255,${fa})`)
-          fGrd.addColorStop(1, 'transparent')
-          ctx.fillStyle = fGrd
-          ctx.beginPath()
-          ctx.arc(flowX, flowY, s * 0.075, 0, Math.PI * 2)
-          ctx.fill()
-        }
-      }
-
-      // Thinking: scattered node flashes
+      // Thinking: kilatan ungu acak di antara partikel wajah
       if (st === 'thinking') {
         for (let f = 0; f < 6; f++) {
           const flashT = ((t * 1.1 + f * 0.167) % 1)
           if (flashT > 0.35) continue
-          const idx = Math.floor((f * 53 + Math.floor(t * 2)) % N)
+          const idx = Math.floor((f * 53 + Math.floor(t * 2)) % ps.length)
           const p = ps[idx]
           const fa = (1 - flashT / 0.35) * 0.7
-          const fGrd = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, s * 0.12)
+          const fGrd = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 14)
           fGrd.addColorStop(0, `rgba(160,80,255,${fa})`)
           fGrd.addColorStop(1, 'transparent')
           ctx.fillStyle = fGrd
           ctx.beginPath()
-          ctx.arc(p.x, p.y, s * 0.12, 0, Math.PI * 2)
+          ctx.arc(p.x, p.y, 14, 0, Math.PI * 2)
           ctx.fill()
         }
       }
@@ -509,7 +385,8 @@ export default function App() {
       window.removeEventListener('resize', resize)
       thinkTimers.current.forEach(clearTimeout)
     }
-  }, [assignIdleTargets, assignBodyTargets, assignListeningTargets, assignScatterTargets])
+  }, [])
+
 
   const navLinks = ['Home', 'Features', 'Pricing', 'Documentation', 'About']
 
@@ -674,20 +551,8 @@ export default function App() {
           style={{ background: 'radial-gradient(ellipse at center, transparent 35%, rgba(2,4,8,0.7) 100%)' }}
         />
 
-        {/* Canvas hologram (orb tubuh — aktif saat speaking / listening / thinking) */}
-        <canvas
-          ref={canvasRef}
-          className={`absolute inset-0 w-full h-full transition-opacity duration-700 ${
-            aiState === 'idle' ? 'opacity-0 pointer-events-none' : 'opacity-100'
-          }`}
-        />
-
-        {/* Wajah particle (vector) — tampil saat idle */}
-        {aiState === 'idle' && (
-          <div className="absolute inset-0 w-full h-full transition-opacity duration-700">
-            <FaceParticles active={aiState === 'idle'} />
-          </div>
-        )}
+        {/* Canvas hologram */}
+        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
 
         {/* Bottom fade */}
         <div
